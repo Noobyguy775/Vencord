@@ -16,16 +16,21 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
+import "./styles.css";
+
 import { ApplicationCommandInputType, ApplicationCommandOptionType, findOption, registerCommand, sendBotMessage, unregisterCommand } from "@api/Commands";
 import { definePluginSettings } from "@api/Settings";
+import { copyToClipboard } from "@utils/clipboard";
 import { Devs } from "@utils/constants";
 import definePlugin, { OptionType } from "@utils/types";
+
+import { OpenEditModal } from "./modal";
 
 const EMOTE = "<:luna:1035316192220553236>";
 const DATA_KEY = "MessageTags_TAGS";
 const MessageTagsMarker = Symbol("MessageTags");
 
-interface Tag {
+export interface Tag {
     name: string;
     message: string;
 }
@@ -34,12 +39,34 @@ function getTags() {
     return settings.store.tagsList;
 }
 
+function getAllTags() {
+    return Object.values(settings.store.tagsList).map(tag => ({
+        name: tag.name,
+        value: tag.name,
+        label: tag.name
+    }));
+}
+
 function getTag(name: string) {
     return settings.store.tagsList[name] ?? null;
 }
 
 function addTag(tag: Tag) {
     settings.store.tagsList[tag.name] = tag;
+}
+
+export function editTag(newTag: Tag, oldTag: Tag) {
+    removeTag(oldTag.name);
+    unregisterCommand(oldTag.name);
+
+    addTag(newTag);
+    createTagCommand(newTag);
+}
+
+function addTags(tags: Object) {
+    for (const [name, message] of Object.entries(tags)) {
+        addTag({ name, message });
+    }
 }
 
 function removeTag(name: string) {
@@ -84,7 +111,7 @@ const settings = definePluginSettings({
 export default definePlugin({
     name: "MessageTags",
     description: "Allows you to save messages and to use them with a simple command.",
-    authors: [Devs.Luna],
+    authors: [Devs.Luna, Devs.Nooby],
     settings,
 
     async start() {
@@ -150,15 +177,58 @@ export default definePlugin({
                             required: true
                         }
                     ]
+                },
+                {
+                    name: "export",
+                    description: "Export your tags to your clipboard",
+                    type: ApplicationCommandOptionType.SUB_COMMAND,
+                    options: [
+                        {
+                            name: "export-one",
+                            description: "Export a specific tag",
+                            type: ApplicationCommandOptionType.STRING,
+                            required: false
+                        },
+                        {
+                            name: "export-all",
+                            description: "Export all tags",
+                            type: ApplicationCommandOptionType.BOOLEAN,
+                            required: false
+                        }
+                    ]
+                },
+                {
+                    name: "import",
+                    description: "Import tags from your clipboard",
+                    type: ApplicationCommandOptionType.SUB_COMMAND,
+                    options: [
+                        {
+                            name: "string",
+                            description: "Tag data to import",
+                            type: ApplicationCommandOptionType.STRING,
+                            required: true
+                        }
+                    ]
+                },
+                {
+                    name: "edit",
+                    description: "Edit an existing tag",
+                    type: ApplicationCommandOptionType.SUB_COMMAND,
+                    options: [{
+                        name: "tag-name",
+                        description: "The name of the tag to edit",
+                        type: ApplicationCommandOptionType.STRING,
+                        required: true,
+                        choices: getAllTags()
+                    }]
                 }
             ],
 
             async execute(args, ctx) {
-
                 switch (args[0].name) {
                     case "create": {
-                        const name: string = findOption(args[0].options, "tag-name", "");
-                        const message: string = findOption(args[0].options, "message", "");
+                        const name = findOption<string>(args[0].options, "tag-name", "");
+                        const message = findOption<string>(args[0].options, "message", "");
 
                         if (getTag(name))
                             return sendBotMessage(ctx.channel.id, {
@@ -179,7 +249,7 @@ export default definePlugin({
                         break; // end 'create'
                     }
                     case "delete": {
-                        const name: string = findOption(args[0].options, "tag-name", "");
+                        const name = findOption<string>(args[0].options, "tag-name", "");
 
                         if (!getTag(name))
                             return sendBotMessage(ctx.channel.id, {
@@ -211,7 +281,7 @@ export default definePlugin({
                         break; // end 'list'
                     }
                     case "preview": {
-                        const name: string = findOption(args[0].options, "tag-name", "");
+                        const name = findOption<string>(args[0].options, "tag-name", "");
                         const tag = getTag(name);
 
                         if (!tag)
@@ -224,7 +294,79 @@ export default definePlugin({
                         });
                         break; // end 'preview'
                     }
+                    case "export": {
+                        const exportOne = findOption<string>(args[0].options, "export-one", "");
+                        const exportAll = findOption<boolean>(args[0].options, "export-all", false);
 
+                        if (!(exportOne || exportAll)) {
+                            return sendBotMessage(ctx.channel.id, {
+                                content: `${EMOTE} Please specify either \`export-one\` or \`export-all\`!`
+                            });
+                        }
+
+                        const exportData: Object = {};
+                        if (exportOne) {
+                            const tag = getTag(exportOne);
+                            if (!tag) {
+                                return sendBotMessage(ctx.channel.id, {
+                                    content: `${EMOTE} A Tag with the name **${exportOne}** does not exist!`
+                                });
+                            }
+                            exportData[exportOne] = tag.message;
+                        } else {
+                            for (const tagName in getTags()) {
+                                exportData[tagName] = getTag(tagName).message;
+                            }
+                        }
+
+                        let exported = "";
+
+                        if (exportOne) {
+                            exported = JSON.stringify({ [exportOne]: exportData[exportOne] }, null, 2);
+                        } else {
+                            exported = JSON.stringify(exportData, null, 2);
+                        }
+
+                        copyToClipboard(exported);
+                        sendBotMessage(ctx.channel.id, {
+                            content: `${EMOTE} Successfully copied the tag data to your clipboard!\nYou can also find it below.\`\`\`json\n${exported}\`\`\``
+                        });
+                        break; // end 'export'
+                    }
+                    case "import": {
+                        const importString = findOption<string>(args[0].options, "string", "");
+
+                        let importData: {};
+                        try {
+                            importData = JSON.parse(importString.trim());
+                        } catch {
+                            return sendBotMessage(ctx.channel.id, {
+                                content: `${EMOTE} Failed to parse import string! Make sure you copied it all`
+                            });
+                        }
+
+                        addTags(importData);
+
+                        sendBotMessage(ctx.channel.id, {
+                            content: `${EMOTE} Successfully imported tags!`
+                        });
+                        break; // end 'import'
+                    }
+                    case "edit": {
+                        const name = findOption<string>(args[0].options, "tag-name", "");
+                        const tag = getTag(name);
+
+                        const oldtag = tag;
+
+                        if (!tag) {
+                            return sendBotMessage(ctx.channel.id, {
+                                content: `${EMOTE} A Tag with the name **${name}** does not exist!`
+                            });
+                        }
+
+                        OpenEditModal(tag);
+                        break; // end 'edit'
+                    }
                     default: {
                         sendBotMessage(ctx.channel.id, {
                             content: "Invalid sub-command"
